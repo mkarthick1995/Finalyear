@@ -230,6 +230,181 @@ def get_scan_detail(scan_id: str, db: Session = Depends(get_db)):
     return scan
 
 
+@app.get("/api/risk-insights/{patient_id}")
+def get_risk_insights(patient_id: str, days: int = 30, db: Session = Depends(get_db)):
+    """Combine latest scan data with hydration history to create a recovery roadmap."""
+    patient = db.query(Patient).filter(Patient.id == patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    latest_scan = db.query(KidneyScan).filter(
+        KidneyScan.patient_id == patient_id
+    ).order_by(KidneyScan.created_at.desc()).first()
+
+    scan_count = db.query(func.count(KidneyScan.id)).filter(
+        KidneyScan.patient_id == patient_id
+    ).scalar() or 0
+
+    start_date = datetime.utcnow() - timedelta(days=days)
+    hydration_entries = db.query(WaterIntake).filter(
+        WaterIntake.patient_id == patient_id,
+        WaterIntake.date >= start_date
+    ).order_by(WaterIntake.date.asc()).all()
+
+    daily_totals = {}
+    for entry in hydration_entries:
+        day_key = entry.date.date().isoformat()
+        daily_totals[day_key] = daily_totals.get(day_key, 0) + float(entry.amount_ml)
+
+    daily_percentages = []
+    for day_key in sorted(daily_totals):
+        percentage = min(100.0, round((daily_totals[day_key] / 2500.0) * 100, 1))
+        daily_percentages.append(percentage)
+
+    average_compliance = round(sum(daily_percentages) / len(daily_percentages), 1) if daily_percentages else 0.0
+    consistency = round(sum(1 for p in daily_percentages if p >= 80) / len(daily_percentages) * 100, 1) if daily_percentages else 0.0
+
+    severity_weight = {
+        "none": 8,
+        "mild": 25,
+        "moderate": 48,
+        "severe": 72,
+    }.get((latest_scan.severity or "none").lower(), 20)
+
+    size_penalty = min(18.0, (latest_scan.stone_size_mm or 0) / 10.0 * 8.0) if latest_scan else 0.0
+    hydration_penalty = max(0.0, (100.0 - average_compliance) / 100.0 * 35.0)
+    recurrence_penalty = min(10.0, scan_count * 3.0)
+
+    risk_percentage = round(min(100.0, severity_weight + size_penalty + hydration_penalty + recurrence_penalty), 1)
+    recovery_percentage = round(max(0.0, 100.0 - risk_percentage), 1)
+    risk_level = "High" if risk_percentage >= 70 else "Moderate" if risk_percentage >= 40 else "Low"
+
+    warnings = []
+    if average_compliance < 70:
+        warnings.append("Hydration is below the recommended target and is increasing recurrence risk.")
+    if latest_scan and latest_scan.severity in ("moderate", "severe"):
+        warnings.append("The latest scan shows a moderate or severe stone pattern that needs close follow-up.")
+    if latest_scan and (latest_scan.stone_size_mm or 0) >= 8:
+        warnings.append("The stone size is large enough to warrant frequent monitoring and specialist review.")
+    if scan_count > 1:
+        warnings.append("Repeated stone findings suggest a higher recurrence risk.")
+    if not latest_scan:
+        warnings.append("No recent scan data is available yet. Upload a fresh scan to improve the insights.")
+
+    roadmap = []
+    if average_compliance >= 80:
+        month_1_status = "On track"
+        month_2_status = "On track"
+        month_3_status = "On track"
+    else:
+        month_1_status = "Needs focus"
+        month_2_status = "Needs focus"
+        month_3_status = "Needs focus"
+
+    roadmap.append({
+        "month": 1,
+        "title": "Month 1 – Build the hydration baseline",
+        "goal": "Reach at least 80% of your daily hydration goal for most days",
+        "focus": "Drink water every 2–3 hours and log each intake immediately",
+        "status": month_1_status,
+        "actions": [
+            "Aim for 2500–3000 ml daily depending on your stone type",
+            "Carry a bottle and set reminders every 2 hours",
+            "Log hydration after every main meal"
+        ]
+    })
+    roadmap.append({
+        "month": 2,
+        "title": "Month 2 – Stabilize diet and reduce recurrence triggers",
+        "goal": "Stay consistent with hydration and lower high-oxalate triggers",
+        "focus": "Follow the stone-specific nutrition guidance and limit sodium",
+        "status": month_2_status,
+        "actions": [
+            "Avoid processed foods and excess salt",
+            "Use the stone-specific diet list from the scan insights",
+            "Review your hydration log weekly and correct low days"
+        ]
+    })
+    roadmap.append({
+        "month": 3,
+        "title": "Month 3 – Consolidate recovery and monitor progress",
+        "goal": "Maintain compliance and improve recovery outlook",
+        "focus": "Repeat the scan and review the trend with your care team",
+        "status": month_3_status,
+        "actions": [
+            "Continue daily hydration tracking",
+            "Recheck symptoms and stone indicators every 2 weeks",
+            "Schedule a follow-up scan if symptoms return"
+        ]
+    })
+
+    guidelines = []
+    if latest_scan and latest_scan.stone_type == "calcium_oxalate":
+        guidelines.extend([
+            "Limit oxalate-rich foods like spinach, beets, nuts, and chocolate",
+            "Keep sodium intake low and maintain regular hydration"
+        ])
+    elif latest_scan and latest_scan.stone_type == "uric_acid":
+        guidelines.extend([
+            "Reduce purine-rich foods such as red meat and seafood",
+            "Avoid alcohol and sugary drinks"
+        ])
+    else:
+        guidelines.extend([
+            "Follow the recommended diet guidance for your stone type",
+            "Stay hydrated and keep a daily log"
+        ])
+
+    guidelines.append("Seek urgent medical help if you develop severe pain, fever, or vomiting")
+
+    danger_if_ignored = []
+    if average_compliance < 80:
+        danger_if_ignored.append({
+            "period": "Within 1 week",
+            "impact": "Hydration shortfall may push recurrence risk higher",
+            "message": "Missing daily hydration targets can quickly increase stone recurrence risk."
+        })
+    if latest_scan and latest_scan.severity in ("moderate", "severe"):
+        danger_if_ignored.append({
+            "period": "Within 2 weeks",
+            "impact": "Stone symptoms may worsen without follow-up",
+            "message": "A moderate or severe stone pattern needs closer monitoring and care-team follow-up."
+        })
+    if recovery_percentage < 50:
+        danger_if_ignored.append({
+            "period": "Within 1 month",
+            "impact": "Recovery may slow and recurrence risk may stay high",
+            "message": "Ignoring the recovery plan can keep the risk percentage high for several weeks."
+        })
+    if not danger_if_ignored:
+        danger_if_ignored.append({
+            "period": "Stay consistent",
+            "impact": "Progress is steady but still needs maintenance",
+            "message": "Keep the current hydration and diet routine to preserve recovery progress."
+        })
+
+    return {
+        "patient_id": patient_id,
+        "patient_name": patient.name,
+        "risk_percentage": risk_percentage,
+        "risk_level": risk_level,
+        "recovery_percentage": recovery_percentage,
+        "hydration_compliance": average_compliance,
+        "hydration_consistency": consistency,
+        "latest_scan": {
+            "stone_size_mm": round(latest_scan.stone_size_mm, 2) if latest_scan else 0,
+            "severity": latest_scan.severity if latest_scan else "none",
+            "location": latest_scan.stone_location if latest_scan else "Not available",
+            "stone_type": latest_scan.stone_type if latest_scan else "unknown"
+        },
+        "warnings": warnings,
+        "roadmap": roadmap,
+        "guidelines": guidelines,
+        "danger_if_ignored": danger_if_ignored,
+        "analysis_window_days": days
+    }
+
+
 # ============= Water Intake Tracking Endpoints =============
 
 @app.post("/api/water-intake", response_model=WaterIntakeResponse)

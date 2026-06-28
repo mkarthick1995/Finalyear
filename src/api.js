@@ -191,6 +191,19 @@ export const getWaterHistory = async (patientId, days = 7) => {
   }
 };
 
+export const getRiskInsights = async (patientId, days = 30) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/risk-insights/${patientId}?days=${days}`);
+    if (!response.ok) {
+      throw new Error(`API Error: ${response.status} - ${response.statusText}`);
+    }
+    return await response.json();
+  } catch (error) {
+    console.error("Error fetching risk insights:", error);
+    throw error;
+  }
+};
+
 export const resetWaterIntakeForDay = async (patientId, date = null) => {
   try {
     let url = `${API_BASE_URL}/water-intake/${patientId}/reset`;

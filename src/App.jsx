@@ -3,6 +3,7 @@ import { motion, useAnimation } from 'framer-motion';
 import { Upload, Droplet, TrendingDown, Activity, AlertCircle, Check, Calendar, Award } from 'lucide-react';
 import ImageUploadComponent from './components/ImageUploadComponent';
 import WaterIntakeComponent from './components/WaterIntakeComponent';
+import RiskInsightsComponent from './components/RiskInsightsComponent';
 
 export default function App() {
   const [hydration, setHydration] = useState(0);
@@ -158,7 +159,7 @@ export default function App() {
             <motion.div variants={itemVariants}>
               {activeTab === 'scan' && <ImageUploadComponent patientId="patient_demo_001" />}
               {activeTab === 'hydration' && <WaterIntakeComponent patientId="patient_demo_001" />}
-              {activeTab === 'risk' && <div className="text-center text-slate-600 py-12"><p>Risk Insights coming soon</p></div>}
+              {activeTab === 'risk' && <RiskInsightsComponent patientId="patient_demo_001" />}
               {activeTab === 'appointments' && <div className="text-center text-slate-600 py-12"><p>Appointments coming soon</p></div>}
               {activeTab === 'goals' && <div className="text-center text-slate-600 py-12"><p>Health Goals coming soon</p></div>}
             </motion.div>
