@@ -5,6 +5,7 @@ import ImageUploadComponent from './components/ImageUploadComponent';
 import WaterIntakeComponent from './components/WaterIntakeComponent';
 import RiskInsightsComponent from './components/RiskInsightsComponent';
 
+import AppointmentsComponent from './components/AppointmentsComponent';
 export default function App() {
   const [hydration, setHydration] = useState(0);
   const [riskScore, setRiskScore] = useState(0);
@@ -160,7 +161,7 @@ export default function App() {
               {activeTab === 'scan' && <ImageUploadComponent patientId="patient_demo_001" />}
               {activeTab === 'hydration' && <WaterIntakeComponent patientId="patient_demo_001" />}
               {activeTab === 'risk' && <RiskInsightsComponent patientId="patient_demo_001" />}
-              {activeTab === 'appointments' && <div className="text-center text-slate-600 py-12"><p>Appointments coming soon</p></div>}
+              {activeTab === 'appointments' && <AppointmentsComponent patientId="patient_demo_001" />}
               {activeTab === 'goals' && <div className="text-center text-slate-600 py-12"><p>Health Goals coming soon</p></div>}
             </motion.div>
           )}

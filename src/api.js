@@ -341,3 +341,65 @@ export const checkApiHealth = async () => {
     return { status: "unavailable" };
   }
 };
+
+// ============= Appointments =============
+
+export const createAppointment = async (patientId, appointmentData) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/appointments`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        patient_id: patientId,
+        ...appointmentData,
+      }),
+    });
+    return await response.json();
+  } catch (error) {
+    console.error("Error creating appointment:", error);
+    throw error;
+  }
+};
+
+export const saveRecommendations = async (patientId, appointmentId, recommendations) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/recommendations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        patient_id: patientId,
+        appointment_id: appointmentId,
+        hydration_adjustment: recommendations.hydrationAdjustment,
+        dietary_changes: recommendations.dietaryChanges,
+        medication_changes: recommendations.medicationChanges,
+        monitoring_schedule: recommendations.monitoringSchedule,
+        follow_up_date: recommendations.followUpDate,
+        appointment_date: recommendations.appointmentDate,
+      }),
+    });
+    return await response.json();
+  } catch (error) {
+    console.error("Error saving recommendations:", error);
+    throw error;
+  }
+};
+
+export const getAppointments = async (patientId) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/appointments/${patientId}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Error fetching appointments:", error);
+    throw error;
+  }
+};
+
+export const getRecommendations = async (patientId) => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/recommendations/${patientId}`);
+    return await response.json();
+  } catch (error) {
+    console.error("Error fetching recommendations:", error);
+    throw error;
+  }
+};

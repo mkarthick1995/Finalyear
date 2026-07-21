@@ -33,6 +33,8 @@ class Patient(Base):
     # Relationships
     scans = relationship("KidneyScan", back_populates="patient", cascade="all, delete-orphan")
     water_intakes = relationship("WaterIntake", back_populates="patient", cascade="all, delete-orphan")
+    appointments = relationship("Appointment", back_populates="patient", cascade="all, delete-orphan")
+    recommendations = relationship("DoctorRecommendation", back_populates="patient", cascade="all, delete-orphan")
     meals = relationship("MealLog", back_populates="patient", cascade="all, delete-orphan")
 
 
@@ -88,6 +90,44 @@ class MealLog(Base):
     # Relationships
     patient = relationship("Patient", back_populates="meals")
 
+
+
+class Appointment(Base):
+    """Appointment tracking for patient"""
+    __tablename__ = "appointments"
+    
+    id = Column(String, primary_key=True, index=True)
+    patient_id = Column(String, ForeignKey("patients.id"), index=True)
+    appointment_date = Column(DateTime, index=True)
+    appointment_type = Column(String)  # "URGENT", "HIGH_RISK", "MODERATE", "ROUTINE", "OPTIONAL"
+    doctor_type = Column(String)
+    title = Column(String)
+    reason = Column(String)
+    description = Column(Text)
+    status = Column(String, default="scheduled")  # "scheduled", "completed", "cancelled"
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    patient = relationship("Patient", back_populates="appointments")
+
+
+class DoctorRecommendation(Base):
+    """Doctor recommendations after consultation"""
+    __tablename__ = "doctor_recommendations"
+    
+    id = Column(String, primary_key=True, index=True)
+    patient_id = Column(String, ForeignKey("patients.id"), index=True)
+    appointment_id = Column(String, index=True)
+    hydration_adjustment = Column(Text, nullable=True)
+    dietary_changes = Column(Text, nullable=True)
+    medication_changes = Column(Text, nullable=True)
+    monitoring_schedule = Column(Text, nullable=True)
+    follow_up_date = Column(DateTime, nullable=True)
+    appointment_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    patient = relationship("Patient", back_populates="recommendations")
 
 class DietRecommendation(Base):
     """Diet recommendations based on stone type"""

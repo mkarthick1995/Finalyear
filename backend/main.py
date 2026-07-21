@@ -15,7 +15,7 @@ import uuid
 import os
 
 # Import local modules
-from database import init_db, get_db, seed_diet_recommendations, Patient, KidneyScan, WaterIntake, MealLog, DietRecommendation
+from database import init_db, get_db, seed_diet_recommendations, Patient, KidneyScan, WaterIntake, MealLog, DietRecommendation, Appointment, DoctorRecommendation
 from image_utils import save_upload_file, analyze_image_file
 from schemas import (
     PatientCreate, PatientResponse, ScanUploadRequest, ScanResponse, ScanDetailedResponse,
@@ -900,3 +900,186 @@ def get_meal_recommendations(patient_id: str, db: Session) -> list:
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
+
+
+# ============= Appointment Endpoints =============
+
+@app.post("/api/appointments")
+async def create_appointment(
+    patient_id: str,
+    appointment_date: str,
+    appointment_type: str,
+    doctor_type: str,
+    title: str,
+    reason: str,
+    description: str,
+    db: Session = Depends(get_db)
+):
+    """Create a new appointment record"""
+    try:
+        from datetime import datetime
+        import uuid
+        
+        appointment = Appointment(
+            id=f"app_{uuid.uuid4().hex[:8]}",
+            patient_id=patient_id,
+            appointment_date=datetime.fromisoformat(appointment_date),
+            appointment_type=appointment_type,
+            doctor_type=doctor_type,
+            title=title,
+            reason=reason,
+            description=description,
+            status="scheduled"
+        )
+        
+        db.add(appointment)
+        db.commit()
+        db.refresh(appointment)
+        
+        return {
+            "success": True,
+            "appointment_id": appointment.id,
+            "message": f"Appointment scheduled for {appointment_date}"
+        }
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "error": str(e)}, 500
+
+
+@app.get("/api/appointments/{patient_id}")
+async def get_appointments(patient_id: str, db: Session = Depends(get_db)):
+    """Get all appointments for a patient"""
+    try:
+        appointments = db.query(Appointment).filter(
+            Appointment.patient_id == patient_id
+        ).order_by(Appointment.appointment_date.desc()).all()
+        
+        return {
+            "success": True,
+            "appointments": [
+                {
+                    "id": app.id,
+                    "appointment_date": app.appointment_date.isoformat(),
+                    "appointment_type": app.appointment_type,
+                    "doctor_type": app.doctor_type,
+                    "title": app.title,
+                    "reason": app.reason,
+                    "description": app.description,
+                    "status": app.status,
+                    "created_at": app.created_at.isoformat()
+                }
+                for app in appointments
+            ]
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}, 500
+
+
+# ============= Doctor Recommendations Endpoints =============
+
+@app.post("/api/recommendations")
+async def save_recommendations(
+    patient_id: str,
+    appointment_id: str,
+    hydration_adjustment: str = None,
+    dietary_changes: str = None,
+    medication_changes: str = None,
+    monitoring_schedule: str = None,
+    follow_up_date: str = None,
+    appointment_date: str = None,
+    db: Session = Depends(get_db)
+):
+    """Save doctor recommendations after consultation"""
+    try:
+        from datetime import datetime
+        import uuid
+        
+        recommendation = DoctorRecommendation(
+            id=f"rec_{uuid.uuid4().hex[:8]}",
+            patient_id=patient_id,
+            appointment_id=appointment_id,
+            hydration_adjustment=hydration_adjustment,
+            dietary_changes=dietary_changes,
+            medication_changes=medication_changes,
+            monitoring_schedule=monitoring_schedule,
+            follow_up_date=datetime.fromisoformat(follow_up_date) if follow_up_date else None,
+            appointment_date=datetime.fromisoformat(appointment_date) if appointment_date else None
+        )
+        
+        db.add(recommendation)
+        db.commit()
+        db.refresh(recommendation)
+        
+        return {
+            "success": True,
+            "recommendation_id": recommendation.id,
+            "message": "Doctor recommendations saved successfully",
+            "follow_up_date": follow_up_date
+        }
+    except Exception as e:
+        db.rollback()
+        return {"success": False, "error": str(e)}, 500
+
+
+@app.get("/api/recommendations/{patient_id}")
+async def get_recommendations(patient_id: str, db: Session = Depends(get_db)):
+    """Get all doctor recommendations for a patient"""
+    try:
+        recommendations = db.query(DoctorRecommendation).filter(
+            DoctorRecommendation.patient_id == patient_id
+        ).order_by(DoctorRecommendation.created_at.desc()).all()
+        
+        return {
+            "success": True,
+            "recommendations": [
+                {
+                    "id": rec.id,
+                    "appointment_id": rec.appointment_id,
+                    "hydration_adjustment": rec.hydration_adjustment,
+                    "dietary_changes": rec.dietary_changes,
+                    "medication_changes": rec.medication_changes,
+                    "monitoring_schedule": rec.monitoring_schedule,
+                    "follow_up_date": rec.follow_up_date.isoformat() if rec.follow_up_date else None,
+                    "appointment_date": rec.appointment_date.isoformat() if rec.appointment_date else None,
+                    "created_at": rec.created_at.isoformat()
+                }
+                for rec in recommendations
+            ]
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}, 500
+
+
+@app.get("/api/recommendations/{patient_id}/latest")
+async def get_latest_recommendations(patient_id: str, db: Session = Depends(get_db)):
+    """Get the latest doctor recommendations for a patient"""
+    try:
+        recommendation = db.query(DoctorRecommendation).filter(
+            DoctorRecommendation.patient_id == patient_id
+        ).order_by(DoctorRecommendation.created_at.desc()).first()
+        
+        if not recommendation:
+            return {
+                "success": True,
+                "recommendation": None,
+                "message": "No recommendations yet"
+            }
+        
+        return {
+            "success": True,
+            "recommendation": {
+                "id": recommendation.id,
+                "appointment_id": recommendation.appointment_id,
+                "hydration_adjustment": recommendation.hydration_adjustment,
+                "dietary_changes": recommendation.dietary_changes,
+                "medication_changes": recommendation.medication_changes,
+                "monitoring_schedule": recommendation.monitoring_schedule,
+                "follow_up_date": recommendation.follow_up_date.isoformat() if recommendation.follow_up_date else None,
+                "appointment_date": recommendation.appointment_date.isoformat() if recommendation.appointment_date else None,
+                "created_at": recommendation.created_at.isoformat()
+            }
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}, 500
+
+
