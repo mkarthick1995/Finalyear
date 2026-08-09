@@ -9,6 +9,23 @@ from datetime import datetime
 import json
 
 
+# ============= Auth Schemas =============
+
+class RegisterRequest(BaseModel):
+    name: str
+    email: str
+    password: str = Field(..., min_length=8)
+    age: int = Field(..., ge=1, le=120)
+    gender: str
+    bmi: Optional[float] = None
+    family_history: bool = False
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
 # ============= Patient Schemas =============
 
 class PatientCreate(BaseModel):
@@ -23,6 +40,7 @@ class PatientCreate(BaseModel):
 class PatientResponse(BaseModel):
     id: str
     name: str
+    email: Optional[str] = None
     age: int
     gender: str
     bmi: Optional[float]
@@ -31,6 +49,11 @@ class PatientResponse(BaseModel):
     
     class Config:
         from_attributes = True
+
+
+class AuthResponse(BaseModel):
+    token: str
+    patient: PatientResponse
 
 
 # ============= Scan Schemas =============
@@ -51,11 +74,15 @@ class ScanUploadRequest(BaseModel):
 class ScanResponse(BaseModel):
     id: str
     patient_id: str
-    stone_size_mm: float
-    stone_location: str
+    stone_size_mm: float = 0.0
+    stone_location: str = "Not estimated"
     severity: str
     confidence: float
-    stone_type: str
+    prediction: Optional[str] = None
+    model_version: Optional[str] = None
+    stone_type: Optional[str] = None
+    size_estimated: Optional[bool] = False
+    size_estimation_note: Optional[str] = None
     created_at: datetime
     
     class Config:
@@ -194,3 +221,106 @@ class ErrorResponse(BaseModel):
     success: bool = False
     error: str
     details: Optional[dict] = None
+
+
+# ============= Doctor Schemas =============
+
+class DoctorCreate(BaseModel):
+    patient_id: str
+    name: str
+    hospital: Optional[str] = None
+    phone: Optional[str] = None
+    phone_additional: Optional[str] = None
+    open_time: Optional[str] = None
+    close_time: Optional[str] = None
+
+
+class DoctorResponse(BaseModel):
+    id: str
+    patient_id: str
+    name: str
+    hospital: Optional[str] = None
+    phone: Optional[str] = None
+    phone_additional: Optional[str] = None
+    open_time: Optional[str] = None
+    close_time: Optional[str] = None
+    active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# ============= Appointment Schemas =============
+
+class AppointmentCreate(BaseModel):
+    patient_id: str
+    appointment_date: str  # ISO datetime
+    appointment_type: str
+    doctor_type: str
+    title: str
+    reason: str
+    description: str = ""
+    doctor_id: Optional[str] = None  # saved doctor profile to book with
+
+
+class RecommendationCreate(BaseModel):
+    patient_id: str
+    appointment_id: str
+    hydration_adjustment: Optional[str] = None
+    dietary_changes: Optional[str] = None
+    medication_changes: Optional[str] = None
+    monitoring_schedule: Optional[str] = None
+    follow_up_date: Optional[str] = None
+    appointment_date: Optional[str] = None
+
+
+# ============= Medicine Schemas =============
+
+class MedicineCreate(BaseModel):
+    patient_id: str
+    name: str
+    dose: Optional[str] = None
+    frequency: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class MedicineResponse(BaseModel):
+    id: str
+    patient_id: str
+    name: str
+    dose: Optional[str] = None
+    frequency: Optional[str] = None
+    notes: Optional[str] = None
+    prescribed_by: str  # "patient" | "doctor"
+    active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class PrescriptionItem(BaseModel):
+    name: str
+    dose: Optional[str] = None
+    frequency: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class PrescriptionCreate(BaseModel):
+    patient_id: str
+    appointment_id: Optional[str] = None
+    medicines: List[PrescriptionItem]
+
+
+# ============= Health Goal Schemas =============
+
+class HealthGoalResponse(BaseModel):
+    model_config = {"protected_namespaces": ()}
+
+    patient_id: str
+    date: str
+    source: str  # "nvidia_nim" or "rule_based"
+    goals: List[dict]
+    disclaimer: str
+    model_metrics: Optional[dict] = None

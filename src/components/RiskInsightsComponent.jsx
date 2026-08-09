@@ -151,9 +151,10 @@ export default function RiskInsightsComponent({ patientId = 'patient_demo_001' }
               <h3 className="text-xl font-bold text-slate-900">Latest scan snapshot</h3>
             </div>
             <div className="space-y-3 text-sm text-slate-600">
-              <div className="flex justify-between"><span>Stone size</span><span className="font-semibold text-slate-900">{insights?.latest_scan?.stone_size_mm ?? 0} mm</span></div>
+              <div className="flex justify-between"><span>Prediction</span><span className="font-semibold uppercase text-slate-900">{insights?.latest_scan?.prediction ?? 'none'}</span></div>
+              <div className="flex justify-between"><span>Confidence</span><span className="font-semibold text-slate-900">{insights?.latest_scan?.confidence != null ? `${(insights.latest_scan.confidence * 100).toFixed(1)}%` : 'N/A'}</span></div>
               <div className="flex justify-between"><span>Severity</span><span className="font-semibold text-slate-900">{insights?.latest_scan?.severity ?? 'none'}</span></div>
-              <div className="flex justify-between"><span>Location</span><span className="font-semibold text-slate-900">{insights?.latest_scan?.location ?? 'N/A'}</span></div>
+              <div className="flex justify-between"><span>Location</span><span className="font-semibold text-slate-900">{insights?.latest_scan?.location ?? 'Not estimated'}</span></div>
               <div className="flex justify-between"><span>Type</span><span className="font-semibold text-slate-900">{insights?.latest_scan?.stone_type ?? 'unknown'}</span></div>
             </div>
           </div>

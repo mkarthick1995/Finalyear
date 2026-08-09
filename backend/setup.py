@@ -40,11 +40,11 @@ def main():
     print("✓ Backend setup complete!")
     print("="*60)
     print("\n📝 Next steps:")
-    print("  1. Start the backend: python main.py")
-    print("  2. API docs: http://localhost:8000/docs")
-    print("  3. Optional: Train ML models")
-    print("     - Vision model: python train_vision_model.py")
-    print("     - Risk model: python train_risk_model.py")
+    print("  1. Start the backend: python -m uvicorn main:app --port 8001")
+    print("  2. API docs: http://localhost:8001/docs")
+    print("  3. Optional: Train the scan model")
+    print("     - python prepare_dataset.py")
+    print("     - python train_vision_model.py")
     print("\n")
 
 if __name__ == "__main__":

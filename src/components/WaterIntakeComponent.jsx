@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Droplet, Plus, Minus, CheckCircle, AlertCircle, Loader, RefreshCw, Calendar, Trash2 } from 'lucide-react';
 import { logWaterIntake, getDailyWaterSummary, resetWaterIntakeForDay } from '../api';
 
@@ -19,21 +19,20 @@ export default function WaterIntakeComponent({ patientId = 'patient_demo_001' })
   // Daily goal is 2-3 liters (2500ml recommended for kidney stone prevention)
   const DAILY_GOAL = 2500;
 
+  const fetchDailySummary = useCallback(() => {
+    getDailyWaterSummary(patientId, selectedDate)
+      .then((summary) => setDailySummary(summary))
+      .catch((err) => {
+        console.error('Failed to fetch water summary:', err);
+      });
+  }, [patientId, selectedDate]);
+
   // Fetch daily summary on mount and when date changes
   useEffect(() => {
     fetchDailySummary();
     const interval = setInterval(fetchDailySummary, 30000); // Refresh every 30 seconds
     return () => clearInterval(interval);
-  }, [patientId, selectedDate]);
-
-  const fetchDailySummary = async () => {
-    try {
-      const summary = await getDailyWaterSummary(patientId, selectedDate);
-      setDailySummary(summary);
-    } catch (err) {
-      console.error('Failed to fetch water summary:', err);
-    }
-  };
+  }, [fetchDailySummary]);
 
   const handleRefresh = async () => {
     setRefreshing(true);

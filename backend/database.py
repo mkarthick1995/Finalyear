@@ -1,6 +1,6 @@
 """
 RenalCare AI - Database Models
-SQLAlchemy models for patients, scans, meals, and water intake
+SQLAlchemy models for patients, scans, meals, water intake, auth, and goals
 """
 
 from sqlalchemy import create_engine, Column, String, Float, Integer, DateTime, Boolean, ForeignKey, Text
@@ -21,38 +21,75 @@ Base = declarative_base()
 class Patient(Base):
     """Patient/User model"""
     __tablename__ = "patients"
-    
+
     id = Column(String, primary_key=True, index=True)
     name = Column(String, index=True)
+    email = Column(String, unique=True, index=True, nullable=True)
+    password_hash = Column(String, nullable=True)
     age = Column(Integer)
     gender = Column(String)
     bmi = Column(Float)
     family_history = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     scans = relationship("KidneyScan", back_populates="patient", cascade="all, delete-orphan")
     water_intakes = relationship("WaterIntake", back_populates="patient", cascade="all, delete-orphan")
     appointments = relationship("Appointment", back_populates="patient", cascade="all, delete-orphan")
     recommendations = relationship("DoctorRecommendation", back_populates="patient", cascade="all, delete-orphan")
     meals = relationship("MealLog", back_populates="patient", cascade="all, delete-orphan")
+    medicines = relationship("Medicine", back_populates="patient", cascade="all, delete-orphan")
+    doctors = relationship("Doctor", back_populates="patient", cascade="all, delete-orphan")
+    sessions = relationship("UserSession", back_populates="patient", cascade="all, delete-orphan")
+    health_goals = relationship("HealthGoal", back_populates="patient", cascade="all, delete-orphan")
+
+
+class UserSession(Base):
+    """Auth session token"""
+    __tablename__ = "user_sessions"
+
+    id = Column(String, primary_key=True)
+    patient_id = Column(String, ForeignKey("patients.id"), index=True)
+    token = Column(String, unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    expires_at = Column(DateTime)
+
+    patient = relationship("Patient", back_populates="sessions")
+
+
+class HealthGoal(Base):
+    """Cached daily health goals (per user per day)"""
+    __tablename__ = "health_goals"
+
+    id = Column(String, primary_key=True, index=True)
+    patient_id = Column(String, ForeignKey("patients.id"), index=True)
+    goal_date = Column(String, index=True)  # YYYY-MM-DD
+    content = Column(Text)  # JSON string
+    source = Column(String)  # "nvidia_nim" or "rule_based"
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    patient = relationship("Patient", back_populates="health_goals")
 
 
 class KidneyScan(Base):
     """Kidney stone scan analysis results"""
     __tablename__ = "kidney_scans"
-    
+
     id = Column(String, primary_key=True, index=True)
     patient_id = Column(String, ForeignKey("patients.id"), index=True)
     image_path = Column(String)
     stone_size_mm = Column(Float)
-    stone_location = Column(String)  # e.g., "left_kidney", "right_ureter", etc.
-    severity = Column(String)  # "mild", "moderate", "severe"
+    stone_location = Column(String)
+    severity = Column(String)  # "none" (normal) or "present" (stone detected)
     confidence = Column(Float)  # 0-1
-    stone_type = Column(String)  # "calcium_oxalate", "uric_acid", etc.
+    prediction = Column(String)  # "normal" or "stone"
+    model_version = Column(String)  # model checkpoint referenced by vision_metrics.json
+    stone_type = Column(String, nullable=True)  # user-selected input, NOT a model claim
     analysis_results = Column(Text)  # JSON string with detailed results
+    size_estimated = Column(Boolean, default=False)  # Grad-CAM size estimate available
+    size_estimation_note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     patient = relationship("Patient", back_populates="scans")
 
@@ -60,7 +97,7 @@ class KidneyScan(Base):
 class WaterIntake(Base):
     """Daily water intake tracking"""
     __tablename__ = "water_intakes"
-    
+
     id = Column(String, primary_key=True, index=True)
     patient_id = Column(String, ForeignKey("patients.id"), index=True)
     date = Column(DateTime, index=True)
@@ -68,7 +105,7 @@ class WaterIntake(Base):
     time = Column(String)  # Time of intake (e.g., "08:30")
     notes = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     patient = relationship("Patient", back_populates="water_intakes")
 
@@ -76,7 +113,7 @@ class WaterIntake(Base):
 class MealLog(Base):
     """User's meal log"""
     __tablename__ = "meal_logs"
-    
+
     id = Column(String, primary_key=True, index=True)
     patient_id = Column(String, ForeignKey("patients.id"), index=True)
     date = Column(DateTime, index=True)
@@ -86,35 +123,76 @@ class MealLog(Base):
     sodium_mg = Column(Float)
     notes = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     patient = relationship("Patient", back_populates="meals")
 
+
+class Medicine(Base):
+    """Patient's daily medicine list. Entries are either self-tracked by the patient
+    (prescribed_by="patient") or set by a doctor during an appointment
+    (prescribed_by="doctor"). Only active=True entries form the current list."""
+    __tablename__ = "medicines"
+
+    id = Column(String, primary_key=True, index=True)
+    patient_id = Column(String, ForeignKey("patients.id"), index=True)
+    name = Column(String, index=True)
+    dose = Column(String, nullable=True)
+    frequency = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
+    prescribed_by = Column(String, default="patient")  # "patient" | "doctor"
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    patient = relationship("Patient", back_populates="medicines")
+
+
+class Doctor(Base):
+    """Doctor/clinic details saved by the patient for booking appointments.
+    Patients can keep multiple doctors; bookings reference one of them."""
+    __tablename__ = "doctors"
+
+    id = Column(String, primary_key=True, index=True)
+    patient_id = Column(String, ForeignKey("patients.id"), index=True)
+    name = Column(String)
+    hospital = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    phone_additional = Column(String, nullable=True)
+    open_time = Column(String, nullable=True)
+    close_time = Column(String, nullable=True)
+    active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    patient = relationship("Patient", back_populates="doctors")
+    appointments = relationship("Appointment", back_populates="doctor")
 
 
 class Appointment(Base):
     """Appointment tracking for patient"""
     __tablename__ = "appointments"
-    
+
     id = Column(String, primary_key=True, index=True)
     patient_id = Column(String, ForeignKey("patients.id"), index=True)
     appointment_date = Column(DateTime, index=True)
     appointment_type = Column(String)  # "URGENT", "HIGH_RISK", "MODERATE", "ROUTINE", "OPTIONAL"
     doctor_type = Column(String)
+    doctor_id = Column(String, ForeignKey("doctors.id"), nullable=True)  # saved doctor profile used for this booking
     title = Column(String)
     reason = Column(String)
     description = Column(Text)
     status = Column(String, default="scheduled")  # "scheduled", "completed", "cancelled"
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     patient = relationship("Patient", back_populates="appointments")
+    doctor = relationship("Doctor", back_populates="appointments")
 
 
 class DoctorRecommendation(Base):
     """Doctor recommendations after consultation"""
     __tablename__ = "doctor_recommendations"
-    
+
     id = Column(String, primary_key=True, index=True)
     patient_id = Column(String, ForeignKey("patients.id"), index=True)
     appointment_id = Column(String, index=True)
@@ -125,14 +203,15 @@ class DoctorRecommendation(Base):
     follow_up_date = Column(DateTime, nullable=True)
     appointment_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
-    
+
     # Relationships
     patient = relationship("Patient", back_populates="recommendations")
+
 
 class DietRecommendation(Base):
     """Diet recommendations based on stone type"""
     __tablename__ = "diet_recommendations"
-    
+
     id = Column(String, primary_key=True, index=True)
     stone_type = Column(String, unique=True, index=True)
     restricted_foods = Column(Text)  # JSON string
@@ -144,9 +223,37 @@ class DietRecommendation(Base):
 
 # ============= Database Initialization =============
 
+def _migrate_columns():
+    """SQLite doesn't add columns to existing tables via create_all.
+    Add new columns added after the table was first created."""
+    if not DATABASE_URL.startswith("sqlite"):
+        return
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    for table, columns in {
+        "kidney_scans": [
+            ("size_estimated", "BOOLEAN"),
+            ("size_estimation_note", "TEXT"),
+        ],
+        "appointments": [
+            ("doctor_id", "VARCHAR(64)"),
+        ],
+    }.items():
+        if table not in inspector.get_table_names():
+            continue
+        existing = {col["name"] for col in inspector.get_columns(table)}
+        for col_name, col_type in columns:
+            if col_name not in existing:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"))
+                print(f"✓ Migrated: added {table}.{col_name}")
+
+
 def init_db():
     """Initialize database and create tables"""
     Base.metadata.create_all(bind=engine)
+    _migrate_columns()
     print("✓ Database initialized successfully")
 
 
@@ -162,7 +269,7 @@ def get_db():
 def seed_diet_recommendations(db):
     """Seed diet recommendations into database"""
     import json
-    
+
     recommendations = [
         {
             "id": "rec_calcium_oxalate",
@@ -225,11 +332,11 @@ def seed_diet_recommendations(db):
             ])
         }
     ]
-    
+
     for rec in recommendations:
         existing = db.query(DietRecommendation).filter_by(stone_type=rec["stone_type"]).first()
         if not existing:
             db.add(DietRecommendation(**rec))
-    
+
     db.commit()
     print("✓ Diet recommendations seeded")
