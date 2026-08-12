@@ -19,16 +19,53 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.getenv("VISION_MODEL_PATH", os.path.join(BASE_DIR, "models", "kidney_stone_cnn.pth"))
 METRICS_PATH = os.getenv("VISION_METRICS_PATH", os.path.join(BASE_DIR, "models", "vision_metrics.json"))
 
-# Assumed CT pixel spacing for uploaded (metadata-stripped) images, in mm per pixel.
-# Typical abdominal CT slices are ~0.6-1.0 mm/pixel; 0.78 is the documented default.
-PIXELS_PER_MM = float(os.getenv("PIXELS_PER_MM", "0.78"))
+# Stone-size calibration file: {mm_per_px, target_median_mm, source, note}.
+# Produced offline by calibrate_size_scale.py against the training population
+# (typical kidney stones are 0-10 mm, rarely up to 12-15 mm). No DICOM metadata
+# is present on uploaded images, so this population-derived pixel spacing is the
+# documented approximation used for size estimation.
+STONE_SCALE_PATH = os.getenv(
+    "STONE_SCALE_PATH", os.path.join(BASE_DIR, "models", "stone_scale.json")
+)
+
+# Reference image width the calibration was derived on (dominant resolution of
+# the training population and the typical CT export width). Pixel diameters are
+# normalized to this width for both calibration and estimation.
+REFERENCE_WIDTH = int(os.getenv("STONE_REFERENCE_WIDTH", "512"))
 
 CLASSES = ["normal", "stone"]
 
+
+def _load_stone_scale() -> dict:
+    """Load the calibrated mm-per-pixel value (with documented defaults)."""
+    default = {
+        "mm_per_px": 0.125,  # conservative default until calibration exists
+        "target_median_mm": 6.0,
+        "source": "uncalibrated default",
+        "note": None,
+    }
+    try:
+        with open(STONE_SCALE_PATH) as f:
+            data = json.load(f)
+        merged = dict(default)
+        merged.update({k: v for k, v in data.items() if k in ("mm_per_px", "target_median_mm", "source", "note")})
+        return merged
+    except Exception:
+        return default
+
+
+STONE_SCALE = _load_stone_scale()
+MM_PER_PX = float(STONE_SCALE["mm_per_px"])
+
+# Calibration ceiling: sizes above MAX_DIAMETER_MM are clamped (rare passthrough
+# for very large stones; the calibrated distribution lands at or below this).
+MAX_DIAMETER_MM = float(os.getenv("MAX_DIAMETER_MM", "15.0"))
+
 SIZE_ESTIMATION_NOTE = (
-    "Estimated from the model's attention region on the CT image using an assumed pixel "
-    f"spacing of {PIXELS_PER_MM} mm/pixel (uploaded images carry no DICOM metadata, so this "
-    "is an approximation, not a clinical measurement)."
+    "Estimated from the brightest stone-scale structure inside the model's attention "
+    f"region, calibrated on the training population ({STONE_SCALE['source']}, "
+    f"{MM_PER_PX:.4f} mm/pixel, typical stones 0-10 mm, ceiling {MAX_DIAMETER_MM:g} mm). "
+    "This is an approximation, not a clinical measurement."
 )
 
 _transform = transforms.Compose([
@@ -137,7 +174,12 @@ def metrics_summary() -> dict:
         "model_version": model_version(),
         "training_note": metrics.get("model", {}).get("training_note", ""),
         "size_estimation": {
-            "pixels_per_mm": PIXELS_PER_MM,
+            "calibration": {
+                "mm_per_px": MM_PER_PX,
+                "reference_width_px": REFERENCE_WIDTH,
+                "max_diameter_mm": MAX_DIAMETER_MM,
+                "source": STONE_SCALE.get("source"),
+            },
             "note": SIZE_ESTIMATION_NOTE,
         },
     }
@@ -198,41 +240,92 @@ def grad_cam(image_path: str, class_idx: Optional[int] = None) -> tuple[np.ndarr
     return cam.numpy(), class_idx
 
 
-def estimate_stone_size_mm(
-    image_path: str, cam_threshold: float = 0.5, class_idx: int = 1
-) -> Optional[dict]:
+def _stone_pixel_diameter(
+    image_path: str,
+    class_idx: int = 1,
+    attention_threshold: float = 0.2,
+    bright_fraction: float = 0.01,
+    min_diameter_px: int = 3,
+    max_diameter_px: Optional[int] = None,
+) -> Optional[tuple]:
     """
-    Estimate the largest stone dimension (mm) from the Grad-CAM attention region
-    of the "stone" class. Returns None when the localization is too weak to report.
+    Localize the stone in image pixels and return (area_px, diameter_px).
 
-    Returns:
-        {
-            "stone_size_mm": float,
-            "pixels_per_mm": float,
-            "diameter_pixels": int,
-            "cam_threshold": float,
-            "note": str,
-        }
+    Pure pixel-space detection, shared by the calibrated mm estimator and the
+    offline calibration script:
+      1. Grad-CAM attention of the requested class, upsampled to the original
+         image resolution, selects the region of interest ("stone" class).
+      2. Within that ROI, kidney stones are the brightest structures on CT
+         (hyperdense), so we keep the top `bright_fraction` of intensities.
+      3. The largest 8-connected bright component wins.
+
+    Returns None when no stone-scale component can be localized.
     """
     cam, _ = grad_cam(image_path, class_idx=class_idx)
-    binary = cam >= cam_threshold
-    if not binary.any():
+
+    image = Image.open(image_path).convert("RGB")
+    width, height = image.size
+    cam_resized = np.array(Image.fromarray(cam).resize((width, height), Image.BILINEAR))
+
+    roi = cam_resized >= attention_threshold * float(cam_resized.max())
+    gray = np.array(image.convert("L"), dtype=float)
+    if not roi.any():
         return None
 
-    labeled, n = ndimage.label(binary)
+    meaningful = gray[roi]
+    bright_threshold = float(np.percentile(meaningful, 100 * (1 - bright_fraction)))
+    bright = roi & (gray >= bright_threshold)
+
+    labeled, n = ndimage.label(bright)
     if n == 0:
         return None
-    sizes = ndimage.sum(binary, labeled, range(1, n + 1))
-    largest = int(np.argmax(sizes)) + 1
-    ys, xs = np.where(labeled == largest)
-    diameter_pixels = max(int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
-    if diameter_pixels < 1:
+
+    max_diameter_px = max_diameter_px or 99999
+    best = None
+    for i in range(1, n + 1):
+        ys, xs = np.where(labeled == i)
+        diameter_pixels = max(int(xs.max() - xs.min() + 1), int(ys.max() - ys.min() + 1))
+        if diameter_pixels < min_diameter_px or diameter_pixels > max_diameter_px:
+            continue
+        area = int((labeled == i).sum())
+        if best is None or area > best[0]:
+            best = (area, diameter_pixels)
+
+    return best
+
+
+def estimate_stone_size_mm(
+    image_path: str,
+    class_idx: int = 1,
+    attention_threshold: float = 0.2,
+    bright_fraction: float = 0.01,
+) -> Optional[dict]:
+    """
+    Estimate the largest stone dimension (mm), calibrated to the training
+    population (typical kidney stones are 0-10 mm, rarely up to 12-15 mm).
+
+    Pixel-scale detection is done by _stone_pixel_diameter(); the diameter is
+    converted at the calibrated MM_PER_PX (see models/stone_scale.json) and
+    clamped at MAX_DIAMETER_MM (documented ceiling).
+
+    Returns None when no stone-scale bright component can be localized.
+    """
+    detected = _stone_pixel_diameter(
+        image_path, class_idx=class_idx, attention_threshold=attention_threshold,
+        bright_fraction=bright_fraction,
+        min_diameter_px=3,
+        max_diameter_px=int(round(MAX_DIAMETER_MM / MM_PER_PX)) + 1,
+    )
+    if detected is None:
         return None
 
+    _, diameter_pixels = detected
+    width, _ = Image.open(image_path).size
+    normalized_px = diameter_pixels * REFERENCE_WIDTH / width
+    diameter_mm = min(normalized_px * MM_PER_PX, MAX_DIAMETER_MM)
     return {
-        "stone_size_mm": round(diameter_pixels * PIXELS_PER_MM, 2),
-        "pixels_per_mm": PIXELS_PER_MM,
+        "stone_size_mm": round(diameter_mm, 1),
+        "pixels_per_mm": round(1.0 / MM_PER_PX, 2),
         "diameter_pixels": diameter_pixels,
-        "cam_threshold": cam_threshold,
         "note": SIZE_ESTIMATION_NOTE,
     }

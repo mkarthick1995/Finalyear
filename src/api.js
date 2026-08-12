@@ -317,6 +317,23 @@ export const getAppointments = async (patientId) => {
   return response.json();
 };
 
+export const getDashboardSummary = async (patientId) => {
+  const response = await request(`${API_BASE_URL}/dashboard/summary/${patientId}`);
+  if (!response.ok) throw new Error(`Failed to load dashboard summary (${response.status})`);
+  return response.json();
+};
+
+export const deleteAppointment = async (appointmentId) => {
+  const response = await request(`${API_BASE_URL}/appointments/${appointmentId}`, {
+    method: "DELETE",
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail || `Failed to delete appointment (${response.status})`);
+  }
+  return response.json();
+};
+
 export const getRecommendations = async (patientId) => {
   const response = await request(`${API_BASE_URL}/recommendations/${patientId}`);
   return response.json();

@@ -234,22 +234,55 @@ export default function ImageUploadComponent({ patientId, onNavigate }) {
                   </div>
 
                   <div className="bg-white rounded-lg p-4 border border-slate-100">
-                    <p className="text-sm text-slate-600 font-medium">Confidence</p>
+                    <p className="text-sm text-slate-600 font-medium">Confidence (model output)</p>
                     <p className="text-xl font-bold text-slate-900 mt-2">
                       {((result.confidence || 0) * 100).toFixed(1)}%
                     </p>
+                    {result.probabilities && (
+                      <div className="mt-2 space-y-1">
+                        {['normal', 'stone'].map((cls) => (
+                          <div key={cls} className="flex items-center gap-2">
+                            <span className="text-[10px] font-semibold uppercase text-slate-500 w-14">
+                              {cls}
+                            </span>
+                            <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                              <div
+                                className={`h-full rounded-full ${
+                                  cls === 'stone' ? 'bg-amber-500' : 'bg-blue-500'
+                                }`}
+                                style={{ width: `${((result.probabilities[cls] || 0) * 100).toFixed(1)}%` }}
+                              />
+                            </div>
+                            <span className="text-[11px] text-slate-600 w-12 text-right">
+                              {((result.probabilities[cls] || 0) * 100).toFixed(1)}%
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div className="bg-white rounded-lg p-4 border border-slate-100">
-                    <p className="text-sm text-slate-600 font-medium">Stone size (estimated)</p>
-                    <p className="text-xl font-bold text-slate-900 mt-2">
-                      {result.stone_size_mm > 0 ? `${result.stone_size_mm.toFixed(2)} mm` : 'Not estimated'}
-                    </p>
-                    <p className="text-[11px] text-slate-400 mt-1">
-                      {result.size_estimated
-                        ? 'Approximate, from the model\'s attention region'
-                        : 'No DICOM metadata to calibrate'}
-                    </p>
+                    <p className="text-sm text-slate-600 font-medium">Stone size (approximate)</p>
+                    {result.size_estimated ? (
+                      <>
+                        <p className="text-xl font-bold text-slate-900 mt-2">
+                          {result.stone_size_mm.toFixed(1)} mm
+                        </p>
+                        <p className="text-[11px] text-slate-400 mt-1">
+                          Rough AI estimate — typical stones are 0-10mm
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <p className="text-sm font-bold text-slate-500 mt-2">
+                          Not measurable
+                        </p>
+                        <p className="text-[11px] text-slate-400 mt-1">
+                          No stone-scale structure could be localized in this image
+                        </p>
+                      </>
+                    )}
                   </div>
 
                   <div className="bg-white rounded-lg p-4 border border-slate-100">

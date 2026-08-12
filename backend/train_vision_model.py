@@ -218,7 +218,8 @@ def main():
                 "Binary image-level normal/stone classification on the public CT-KIDNEY "
                 "dataset (Normal vs Stone, class-balanced). Metrics below are computed on a "
                 "held-out test split with no overlap into training. This model does NOT "
-                "estimate size, location, severity, or composition."
+                "estimate location, severity, or composition. Approximate stone size is "
+                "estimated separately from the trained attention map (see size_estimation)."
             ),
             "trained_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
@@ -227,6 +228,28 @@ def main():
             "manifest": str(args.manifest),
         },
     }
+
+    # Fold in the current size-estimation calibration (if present) so the
+    # metrics file always documents it alongside the classification metrics.
+    scale_path = MODELS_DIR / "stone_scale.json"
+    if scale_path.exists():
+        with open(scale_path) as f:
+            scale = json.load(f)
+        metrics["size_estimation"] = {
+            "method": (
+                "Grad-CAM class-attention ROI -> brightest hyperdense structure "
+                "(top-1% intensities) -> largest 8-connected component (>=3 px), "
+                "normalized to a 512-px reference width"
+            ),
+            "calibration": scale,
+            "note": (
+                "Uploaded images carry no DICOM metadata, so pixel spacing is calibrated "
+                "offline against the stone training population (typical kidney stones are "
+                "0-10 mm, rarely up to 12-15 mm; hard ceiling 15 mm). The reported size is "
+                "an approximation, not a clinical measurement. Regenerate with "
+                "calibrate_size_scale.py; overridable with the STONE_SCALE_PATH env var."
+            ),
+        }
 
     with open(METRICS_OUT, "w") as f:
         json.dump(metrics, f, indent=2)

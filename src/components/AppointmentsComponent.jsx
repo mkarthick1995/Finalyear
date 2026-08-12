@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Calendar, AlertTriangle, CheckCircle, Clock, Heart, Droplet, Pill, AlertCircle, Save, X, User, Plus, Stethoscope, Loader, Phone, Building2, Clock4, Trash2 } from 'lucide-react';
-import { getRiskInsights, getAppointments, createAppointment, saveRecommendations, savePrescription, getDoctors, addDoctor, removeDoctor } from '../api';
+import { getRiskInsights, getAppointments, createAppointment, deleteAppointment, saveRecommendations, savePrescription, getDoctors, addDoctor, removeDoctor } from '../api';
 import { MEDICINE_CATALOG } from '../catalogs';
 
 export default function AppointmentsComponent({ patientId }) {
@@ -41,6 +41,7 @@ export default function AppointmentsComponent({ patientId }) {
   const [addingDoctor, setAddingDoctor] = useState(false);
   const [removingDoctor, setRemovingDoctor] = useState(null);
   const [bookingDoctor, setBookingDoctor] = useState({});
+  const [deletingAppointment, setDeletingAppointment] = useState(null);
 
   // Load any already-booked appointments
   useEffect(() => {
@@ -48,7 +49,9 @@ export default function AppointmentsComponent({ patientId }) {
     let active = true;
     getAppointments(patientId)
       .then((data) => {
-        if (active) setBookedAppointments(Array.isArray(data) ? data : []);
+        if (!active) return;
+        const list = Array.isArray(data) ? data : data?.appointments || [];
+        setBookedAppointments(list);
       })
       .catch(() => {
         if (active) setBookedAppointments([]);
@@ -146,6 +149,21 @@ export default function AppointmentsComponent({ patientId }) {
       setError(err.message || 'Failed to remove doctor');
     } finally {
       setRemovingDoctor(null);
+    }
+  };
+
+  const handleDeleteAppointment = async (appt) => {
+    if (!window.confirm(`Delete the appointment "${appt.title}"?`)) return;
+    setDeletingAppointment(appt.id);
+    setError('');
+    try {
+      await deleteAppointment(appt.id);
+      setBookedAppointments((prev) => prev.filter((a) => a.id !== appt.id));
+      setBookingSuccess('');
+    } catch (err) {
+      setError(err.message || 'Failed to delete appointment');
+    } finally {
+      setDeletingAppointment(null);
     }
   };
 
@@ -745,9 +763,23 @@ export default function AppointmentsComponent({ patientId }) {
                     )}
                   </div>
                 </div>
-                <span className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
-                  {appt.appointment_type}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-700">
+                    {appt.appointment_type}
+                  </span>
+                  <button
+                    onClick={() => handleDeleteAppointment(appt)}
+                    disabled={deletingAppointment === appt.id}
+                    className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                    title="Delete appointment"
+                  >
+                    {deletingAppointment === appt.id ? (
+                      <Loader className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
               </div>
             ))}
           </div>

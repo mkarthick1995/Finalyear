@@ -350,7 +350,12 @@ def get_risk_insights(
     patient = db.query(Patient).filter(Patient.id == patient_id).first()
     if not patient:
         raise HTTPException(status_code=404, detail="Patient not found")
+    return _compute_risk_insights(patient, db, days)
 
+
+def _compute_risk_insights(patient: Patient, db: Session, days: int = 30) -> dict:
+    """Shared risk computation used by /api/risk-insights and the dashboard summary."""
+    patient_id = patient.id
     latest_scan = db.query(KidneyScan).filter(
         KidneyScan.patient_id == patient_id
     ).order_by(KidneyScan.created_at.desc()).first()
@@ -515,6 +520,396 @@ def get_risk_insights(
         "guidelines": guidelines,
         "danger_if_ignored": danger_if_ignored,
         "analysis_window_days": days
+    }
+
+
+# ============= Dashboard Summary (per-section outcomes + overall) =============
+
+def _conclude(score: float) -> str:
+    """Map a 0-100 section score to a status label."""
+    if score >= 75:
+        return "good"
+    if score >= 50:
+        return "attention"
+    if score is None:
+        return "info"
+    return "critical"
+
+
+def _safe_json(raw):
+    """Parse a JSON column defensively (returns [] on any failure)."""
+    if raw is None:
+        return []
+    try:
+        value = json.loads(raw)
+        return value if isinstance(value, list) else []
+    except Exception:
+        return []
+
+
+@app.get("/api/dashboard/summary/{patient_id}")
+def get_dashboard_summary(
+    patient_id: str,
+    current_patient: Patient = Depends(require_patient_access),
+    db: Session = Depends(get_db),
+):
+    """Per-section outcomes (hydration, scan, diet & medicine, risk, appointments,
+    goals) + a single overall conclusion. All values are computed from real
+    tracked data; conclusions are deterministic summaries of that data."""
+    patient = db.query(Patient).filter(Patient.id == patient_id).first()
+    if not patient:
+        raise HTTPException(status_code=404, detail="Patient not found")
+
+    now = datetime.utcnow()
+    today = now.date()
+    sections = {}
+
+    # ---------- Hydration ----------
+    today_intakes = db.query(WaterIntake).filter(
+        WaterIntake.patient_id == patient_id,
+        func.date(WaterIntake.date) == today,
+    ).all()
+    today_ml = sum(i.amount_ml for i in today_intakes)
+    water_goal = 3000.0
+    today_pct = min(100.0, round(today_ml / water_goal * 100, 1))
+
+    week_start = now - timedelta(days=6)
+    week_entries = db.query(WaterIntake).filter(
+        WaterIntake.patient_id == patient_id,
+        WaterIntake.date >= week_start,
+    ).all()
+    weekly = {}
+    for e in week_entries:
+        weekly[e.date.date().isoformat()] = weekly.get(e.date.date().isoformat(), 0) + float(e.amount_ml)
+    week_days = [(now - timedelta(days=i)).date().isoformat() for i in range(6, -1, -1)]
+    weekly_ml = [round(weekly.get(d, 0.0)) for d in week_days]
+    active_days = len([v for v in weekly_ml if v > 0])
+    week_avg_pct = round(
+        sum(min(100.0, weekly.get(d, 0.0) / water_goal * 100) for d in week_days) / 7.0, 1
+    ) if week_days else 0.0
+
+    hyd_score = (today_pct + week_avg_pct) / 2.0 if (today_pct + week_avg_pct) else 0.0
+    if today_pct >= 100:
+        hyd_conclusion = (f"Hydration goal met for today: {round(today_ml)} ml of {round(water_goal)} ml. "
+                          f"Keep the same rhythm to guard against stone recurrence.")
+    elif today_pct >= 60:
+        hyd_conclusion = (f"Hydration is progressing at {today_pct}% of today's goal "
+                          f"({round(today_ml)} ml of {round(water_goal)} ml). "
+                          f"Still {max(0, round(water_goal - today_ml))} ml to go — keep logging.")
+    else:
+        hyd_conclusion = (f"Hydration is low today ({round(today_ml)} ml of {round(water_goal)} ml). "
+                          f"Low urine volume increases the risk of new stone formation — "
+                          f"prioritise drinking water.")
+    hyd_status = _conclude(hyd_score)
+    sections["hydration"] = {
+        "key": "hydration",
+        "title": "Hydration Tracking",
+        "score": round(hyd_score, 1),
+        "status": hyd_status,
+        "metrics": [
+            {"label": "Today", "value": f"{round(today_ml)} / {round(water_goal)} ml"},
+            {"label": "Today target", "value": f"{today_pct}%"},
+            {"label": "7-day average", "value": f"{week_avg_pct}%"},
+            {"label": "Active days (7d)", "value": f"{active_days}/7"},
+        ],
+        "conclusion": hyd_conclusion,
+        "series": [{"label": d[5:], "value": v} for d, v in zip(week_days, weekly_ml)],
+    }
+
+    # ---------- Scan ----------
+    scans = db.query(KidneyScan).filter(
+        KidneyScan.patient_id == patient_id
+    ).order_by(KidneyScan.created_at.desc()).all()
+    latest = scans[0] if scans else None
+    if latest is None:
+        scan_score, scan_status, scan_conclusion = None, "info", (
+            "No AI scan has been uploaded yet. Uploading a kidney CT image lets the model "
+            "check for a stone pattern and estimate a stone size."
+        )
+        scan_metrics = [{"label": "Scans on file", "value": "0"}]
+        latest_scan_summary = None
+    else:
+        stone = latest.prediction == "stone"
+        base = 40 if stone else 85
+        if stone and latest.severity == "present":
+            base = 35
+        if stone and latest.stone_size_mm and latest.stone_size_mm > 10:
+            base = 25
+        scan_score = round(max(0.0, base), 1)
+        if stone:
+            size_txt = f"{latest.stone_size_mm} mm" if latest.stone_size_mm else "not measurable"
+            scan_conclusion = (
+                f"The latest AI scan detected a stone pattern (est. {size_txt}, "
+                f"{round((latest.confidence or 0) * 100)}% confidence). This is an automated "
+                f"screen, not a diagnosis — a urologist follow-up is recommended."
+            )
+        else:
+            scan_conclusion = (
+                f"The latest AI scan shows a normal pattern ({round((latest.confidence or 0) * 100)}% "
+                f"confidence). No stone pattern was flagged in this image."
+            )
+        scan_status = _conclude(scan_score)
+        scan_metrics = [
+            {"label": "Result", "value": latest.prediction},
+            {"label": "Confidence", "value": f"{round((latest.confidence or 0) * 100)}%"},
+            {"label": "Est. size", "value": f"{latest.stone_size_mm} mm" if latest.stone_size_mm else "Not measurable"},
+            {"label": "Scans on file", "value": str(len(scans))},
+        ]
+        latest_scan_summary = {
+            "prediction": latest.prediction,
+            "confidence": round(latest.confidence or 0, 4),
+            "stone_size_mm": latest.stone_size_mm,
+            "severity": latest.severity,
+            "stone_type": latest.stone_type,
+            "created_at": latest.created_at.isoformat(),
+            "model_version": latest.model_version,
+        }
+    sections["scan"] = {
+        "key": "scan",
+        "title": "AI Scan Analysis",
+        "score": scan_score,
+        "status": scan_status,
+        "metrics": scan_metrics,
+        "conclusion": scan_conclusion,
+        "latest_scan": latest_scan_summary,
+    }
+
+    # ---------- Diet & Medicine ----------
+    today_meals = db.query(MealLog).filter(
+        MealLog.patient_id == patient_id,
+        func.date(MealLog.date) == today,
+    ).all()
+    total_sodium = round(sum(m.sodium_mg or 0 for m in today_meals), 1)
+    high_oxalate = []
+    for m in today_meals:
+        if m.oxalate_level == "high":
+            try:
+                items = json.loads(m.food_items)
+                high_oxalate.extend(i.get("name") for i in items if i.get("oxalate_level") == "high")
+            except Exception:
+                pass
+    high_oxalate = list(dict.fromkeys(high_oxalate))
+
+    medicines = db.query(Medicine).filter(
+        Medicine.patient_id == patient_id,
+        Medicine.active == True,  # noqa: E712
+    ).order_by(Medicine.created_at.desc()).all()
+    med_list = [{"name": m.name, "dose": m.dose, "frequency": m.frequency} for m in medicines]
+
+    sodium_score = max(0.0, 100.0 - (min(total_sodium, 4000) / 2000.0) * 70.0)
+    oxalate_penalty = min(40.0, len(high_oxalate) * 15.0)
+    diet_score = round(max(0.0, sodium_score - oxalate_penalty), 1)
+    if not today_meals:
+        diet_conclusion = ("No meals logged today, so diet risk cannot be assessed yet. "
+                           "Log your meals to check sodium and oxalate intake.")
+        diet_status = "info"
+        diet_score = None
+    elif len(high_oxalate) > 0:
+        diet_conclusion = (f"Today you logged {len(today_meals)} meal(s), {round(total_sodium)} mg sodium "
+                           f"and high-oxalate foods: {', '.join(high_oxalate)}. High oxalate/sodium "
+                           f"increases stone risk — prefer low-oxalate, low-salt options.")
+        diet_status = "critical"
+    elif total_sodium <= 2000:
+        diet_conclusion = (f"Today: {len(today_meals)} meal(s), {round(total_sodium)} mg sodium "
+                           f"(within the 2000 mg target), no high-oxalate foods flagged. "
+                           f"Diet risk is low — maintain this pattern.")
+        diet_status = _conclude(diet_score)
+    else:
+        diet_conclusion = (f"Today: {len(today_meals)} meal(s), {round(total_sodium)} mg sodium "
+                           f"which exceeds the 2000 mg target. Try to cut salt for the rest of the day.")
+        diet_status = "attention"
+    diet_metrics = [
+        {"label": "Meals today", "value": str(len(today_meals))},
+        {"label": "Sodium today", "value": f"{total_sodium} mg"},
+        {"label": "High-oxalate foods", "value": ", ".join(high_oxalate) if high_oxalate else "None"},
+        {"label": "Active medicines", "value": str(len(med_list))},
+    ]
+    sections["diet"] = {
+        "key": "diet",
+        "title": "Food & Medicine",
+        "score": diet_score,
+        "status": diet_status,
+        "metrics": diet_metrics,
+        "conclusion": diet_conclusion,
+        "medicines": med_list,
+        "meals_today": [
+            {
+                "meal_type": m.meal_type,
+                "food_items": _safe_json(m.food_items),
+                "oxalate_level": m.oxalate_level,
+                "sodium_mg": m.sodium_mg,
+            }
+            for m in today_meals
+        ],
+    }
+
+    # ---------- Risk Insights ----------
+    risk = _compute_risk_insights(patient, db, days=30)
+    risk_score = round(max(0.0, 100.0 - risk["risk_percentage"]), 1)
+    sections["risk"] = {
+        "key": "risk",
+        "title": "Risk Insights",
+        "score": risk_score,
+        "status": _conclude(risk_score),
+        "metrics": [
+            {"label": "Risk score", "value": f"{risk['risk_percentage']}%"},
+            {"label": "Risk level", "value": risk["risk_level"]},
+            {"label": "Recovery outlook", "value": f"{risk['recovery_percentage']}%"},
+            {"label": "Hydration compliance", "value": f"{risk['hydration_compliance']}%"},
+        ],
+        "conclusion": " ".join(risk["warnings"]) if risk["warnings"] else (
+            "No active risk warnings right now — your tracked data is within safe ranges."
+        ),
+        "details": {
+            "risk_percentage": risk["risk_percentage"],
+            "risk_level": risk["risk_level"],
+            "recovery_percentage": risk["recovery_percentage"],
+            "guidelines": risk["guidelines"],
+            "danger_if_ignored": risk["danger_if_ignored"],
+        },
+    }
+
+    # ---------- Appointments ----------
+    appointments = db.query(Appointment).filter(
+        Appointment.patient_id == patient_id,
+        Appointment.status != "cancelled",
+        Appointment.appointment_date >= now - timedelta(minutes=30),
+    ).order_by(Appointment.appointment_date.asc()).all()
+    upcoming = [
+        {
+            "id": a.id,
+            "appointment_date": a.appointment_date.isoformat(),
+            "appointment_type": a.appointment_type,
+            "doctor_type": a.doctor_type,
+            "title": a.title,
+        }
+        for a in appointments
+    ]
+    if upcoming:
+        nxt = upcoming[0]
+        appt_score, appt_status = 80.0, "good"
+        if nxt["appointment_type"] in ("URGENT", "HIGH_RISK"):
+            appt_score, appt_status = 65.0, "attention"
+        appt_conclusion = (
+            f"{len(upcoming)} upcoming appointment(s); the next is '{nxt['title']}' on "
+            f"{nxt['appointment_date'][:10]} ({nxt['doctor_type'] or nxt['appointment_type']}). "
+            f"Keep this booked so follow-up and prescriptions stay on schedule."
+        )
+    else:
+        appt_score, appt_status = None, "info"
+        appt_conclusion = ("No upcoming appointments booked. If a recent scan flagged a stone or "
+                           "risk is high, booking a urologist visit is strongly advised.")
+    sections["appointments"] = {
+        "key": "appointments",
+        "title": "Appointments",
+        "score": appt_score,
+        "status": appt_status,
+        "metrics": [
+            {"label": "Upcoming", "value": str(len(upcoming))},
+            {"label": "Next", "value": (upcoming[0]["appointment_date"][:10] if upcoming else "None")},
+            {"label": "Next type", "value": (upcoming[0]["appointment_type"] if upcoming else "—")},
+        ],
+        "conclusion": appt_conclusion,
+        "upcoming": upcoming,
+    }
+
+    # ---------- Health Goals ----------
+    goals = get_health_goals(patient, db)
+    goal_items = goals.get("goals", [])
+    goals_categories = list(dict.fromkeys(g.get("category") for g in goal_items if g.get("category")))
+    goals_score = max(0.0, hyd_score + (90.0 if goal_items else 0.0)) if goal_items else hyd_score
+    goals_score = round(min(100.0, goals_score), 1)
+    if goal_items:
+        goals_conclusion = (
+            f"{len(goal_items)} personalized goals generated (today): "
+            f"{', '.join(goals_categories)}. Follow-up targets include: "
+            + "; ".join(g.get("goal", "") for g in goal_items[:3])
+            + "."
+        )
+        goals_status = _conclude(goals_score)
+    else:
+        goals_conclusion = "No health goals available for today yet — open the Health Goals section to generate them."
+        goals_status = "info"
+    sections["goals"] = {
+        "key": "goals",
+        "title": "Health Goals",
+        "score": goals_score,
+        "status": goals_status,
+        "metrics": [
+            {"label": "Goals today", "value": str(len(goal_items))},
+            {"label": "Categories", "value": ", ".join(goals_categories) if goals_categories else "—"},
+            {"label": "Source", "value": goals.get("source", "rule_based")},
+        ],
+        "conclusion": goals_conclusion,
+        "goals": goal_items,
+    }
+
+    # ---------- Overall conclusion ----------
+    weights = {"hydration": 0.25, "scan": 0.20, "diet": 0.15, "risk": 0.25, "appointments": 0.10, "goals": 0.05}
+    scored = [(k, s["score"], weights[k]) for k, s in sections.items() if s["score"] is not None]
+    if scored:
+        overall_score = round(sum(s * w for _, s, w in scored) / sum(w for _, _, w in scored), 1)
+    else:
+        overall_score = None
+    overall_status = _conclude(overall_score) if overall_score is not None else "info"
+
+    note_parts = [
+        ("Scan", "critical", "A stone pattern was detected on your latest scan — schedule a urologist follow-up."),
+        ("Hydration", "attention", "Daily hydration is below target — increase water intake to reach 3 L."),
+        ("Diet", "attention", "Sodium and/or high-oxalate intake is above the recommended limits today."),
+        ("Risk", "attention", "Your computed risk level is Moderate or High — follow the recovery roadmap."),
+        ("Appointments", "info", "No upcoming appointment — book a follow-up to keep monitoring on track."),
+        ("Goals", "attention", "Today's health goals are not yet met — stay consistent with the plan."),
+    ]
+    highlights = []
+    for name, status_key, text in note_parts:
+        sec = sections.get({"Scan": "scan"}.get(name, name.lower()), {})
+        if sec.get("status") == "critical":
+            highlights.append({"level": "critical", "text": text})
+        elif sec.get("status") == "attention":
+            highlights.append({"level": "attention", "text": text})
+    if not highlights:
+        highlights.append({"level": "good", "text": "All tracked sections are within healthy ranges — keep up the current routine."})
+    for w in risk.get("warnings", []):
+        if not any(h["text"] == w for h in highlights):
+            highlights.append({"level": "attention", "text": w})
+
+    if overall_score is None:
+        overall_conclusion = (
+            "Not enough tracked data to compute an overall outcome yet. Log water, meals and a "
+            "scan, then return here to see the combined conclusion."
+        )
+    elif overall_score >= 75:
+        overall_conclusion = (
+            f"Your overall status is GOOD (score {overall_score}/100). Hydration, diet, scan and "
+            f"follow-up are all on track. Maintain the current routine and continue tracking daily."
+        )
+    elif overall_score >= 50:
+        overall_conclusion = (
+            f"Your overall status is MODERATE (score {overall_score}/100). Some areas need focus "
+            f"before they raise recurrence risk — see the per-section outcomes below and follow "
+            f"the highlighted actions."
+        )
+    else:
+        overall_conclusion = (
+            f"Your overall status is CONCERNING (score {overall_score}/100). One or more areas "
+            f"need immediate attention (see per-section outcomes). Consider booking a urologist "
+            f"follow-up with this report."
+        )
+
+    return {
+        "patient": {"id": patient.id, "name": patient.name},
+        "generated_at": now.isoformat(),
+        "sections": [sections[k] for k in ("hydration", "scan", "diet", "risk", "appointments", "goals")],
+        "overall": {
+            "score": overall_score,
+            "status": overall_status,
+            "conclusion": overall_conclusion,
+            "highlights": highlights,
+        },
+        "latest_scan": latest_scan_summary,
+        "water_history": {"days": week_days, "ml": weekly_ml, "goal_ml": water_goal},
+        "disclaimer": "Research/demo system — conclusions are computed from your tracked data and are not a medical diagnosis. Always consult a urologist.",
     }
 
 
@@ -1358,6 +1753,42 @@ def get_appointments(
             for app in appointments
         ]
     }
+
+
+@app.delete("/api/appointments/{appointment_id}")
+def delete_appointment(
+    appointment_id: str,
+    current_patient: Patient = Depends(get_current_patient),
+    db: Session = Depends(get_db),
+):
+    """Cancel/delete a booked appointment (owner only)."""
+    try:
+        appointment = db.query(Appointment).filter(
+            Appointment.id == appointment_id
+        ).first()
+        if not appointment:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+        ensure_patient_access(current_patient, appointment.patient_id)
+
+        # Clean up any doctor recommendations attached to this appointment.
+        db.query(DoctorRecommendation).filter(
+            DoctorRecommendation.appointment_id == appointment_id
+        ).delete(synchronize_session=False)
+
+        title = appointment.title
+        db.delete(appointment)
+        db.commit()
+        return {
+            "success": True,
+            "appointment_id": appointment_id,
+            "message": f"Appointment '{title}' deleted",
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Failed to delete appointment: {str(e)}")
 
 
 # ============= Doctor Recommendations Endpoints =============

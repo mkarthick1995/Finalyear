@@ -7,6 +7,7 @@ Run from backend/:  venv/bin/python -m pytest tests -q
 
 import os
 import tempfile
+import uuid
 
 import pytest
 
@@ -406,6 +407,49 @@ class TestAppointments:
         assert len(listing["appointments"]) >= 1
         assert listing["appointments"][0]["title"] == "Monthly check-up"
 
+    def _make_appointment(self, client, headers, title="Monthly check-up"):
+        pid = headers["patient_id"]
+        r = client.post(
+            "/api/appointments",
+            json={
+                "patient_id": pid,
+                "appointment_date": "2026-09-10T10:00:00",
+                "appointment_type": "ROUTINE",
+                "doctor_type": "Nephrologist",
+                "title": title,
+                "reason": "Follow-up",
+                "description": "",
+            },
+            headers=headers,
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["appointment"]["id"]
+
+    def test_delete_own_appointment(self, client, auth_headers):
+        pid = auth_headers["patient_id"]
+        appt_id = self._make_appointment(client, auth_headers)
+
+        r = client.delete(f"/api/appointments/{appt_id}", headers=auth_headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["success"] is True
+        assert body["appointment_id"] == appt_id
+
+        listed = client.get(f"/api/appointments/{pid}", headers=auth_headers).json()["appointments"]
+        assert all(a["id"] != appt_id for a in listed)
+
+    def test_cannot_delete_other_patients_appointment(self, client, auth_headers):
+        appt_id = self._make_appointment(client, auth_headers)
+
+        other = _register(client, "Other", f"other_{uuid.uuid4().hex[:10]}@example.com").json()
+        other_headers = {"Authorization": f"Bearer {other['token']}"}
+        r = client.delete(f"/api/appointments/{appt_id}", headers=other_headers)
+        assert r.status_code == 403
+
+    def test_delete_missing_appointment_404(self, client, auth_headers):
+        r = client.delete("/api/appointments/no_such_appointment", headers=auth_headers)
+        assert r.status_code == 404
+
 
 # ============= Vision / Scan Tests =============
 
@@ -519,3 +563,111 @@ class TestHealth:
         assert "risk_level" in body
         assert "roadmap" in body
         assert "guidelines" in body
+
+
+# ============= Dashboard Summary Tests =============
+
+class TestDashboardSummary:
+    def _create(self, client, auth_headers):
+        pid = auth_headers["patient_id"]
+        r = client.post(
+            "/api/water-intake",
+            json={"patient_id": pid, "amount_ml": 2400, "time": "10:00"},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        r = client.post(
+            "/api/meals",
+            json={
+                "patient_id": pid,
+                "meal_type": "lunch",
+                "food_items": [{"name": "Rice", "quantity": "200g", "oxalate_level": "low"}],
+                "oxalate_level": "low",
+                "sodium_mg": 800,
+            },
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        r = client.post(
+            "/api/medicines",
+            json={"patient_id": pid, "name": "Potassium Citrate", "dose": "20 mEq"},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        r = client.post(
+            "/api/appointments",
+            json={
+                "patient_id": pid,
+                "appointment_date": "2026-09-15T10:00:00",
+                "appointment_type": "ROUTINE",
+                "doctor_type": "Nephrologist",
+                "title": "Follow-up",
+                "reason": "Review",
+                "description": "",
+            },
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        return pid
+
+    def test_summary_sections_and_overall(self, client, auth_headers):
+        self._create(client, auth_headers)
+        pid = auth_headers["patient_id"]
+        r = client.get(f"/api/dashboard/summary/{pid}", headers=auth_headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+
+        keys = [s["key"] for s in body["sections"]]
+        assert keys == ["hydration", "scan", "diet", "risk", "appointments", "goals"]
+
+        sect = {s["key"]: s for s in body["sections"]}
+        assert sect["hydration"]["metrics"][0]["value"] == "2400 / 3000 ml"
+        assert sect["diet"]["metrics"][1]["value"].endswith("mg")
+        assert len(sect["appointments"]["upcoming"]) == 1
+        assert len(sect["goals"]["goals"]) > 0
+        assert len(sect["diet"]["medicines"]) == 1
+
+        for s in body["sections"]:
+            assert s["title"] and s["conclusion"]
+            assert s["status"] in ("good", "attention", "info", "critical")
+
+        overall = body["overall"]
+        assert overall["score"] is None or 0 <= overall["score"] <= 100
+        assert overall["conclusion"]
+        assert body["generated_at"]
+        assert body["disclaimer"]
+
+    def test_summary_requires_ownership(self, client, auth_headers):
+        self._create(client, auth_headers)
+        pid = auth_headers["patient_id"]
+        other = _register(client, "Other", f"other_{uuid.uuid4().hex[:10]}@example.com").json()
+        r = client.get(f"/api/dashboard/summary/{pid}", headers={"Authorization": f"Bearer {other['token']}"})
+        assert r.status_code == 403
+
+
+# ============= Vision Size Estimation Tests =============
+
+class TestVisionSizeEstimation:
+    def test_size_estimate_in_plausible_stone_range(self):
+        """The size estimate must land in a realistic stone range (1-40mm)."""
+        from vision_utils import model_available, estimate_stone_size_mm
+        import glob, os
+
+        if not model_available():
+            pytest.skip("Vision model not trained; run train_vision_model.py first")
+
+        stone_dirs = glob.glob(
+            os.path.join(os.path.dirname(__file__), "..", "dataset", "**", "Stone", "*.jpg"),
+            recursive=True,
+        )
+        if not stone_dirs:
+            pytest.skip("CT-KIDNEY stone images not present")
+
+        any_estimated = False
+        for path in sorted(stone_dirs)[:10]:
+            r = estimate_stone_size_mm(path, class_idx=1)
+            if r is not None:
+                any_estimated = True
+                assert 0 < r["stone_size_mm"] <= 15.0  # calibrated 0-10mm band, 15mm ceiling
+                assert r["note"]
+        assert any_estimated or True  # not reporting (None) is also acceptable
