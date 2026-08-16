@@ -45,6 +45,21 @@ model is missing, the endpoint returns `503` and `/api/health` reports `"vision_
    - `models/kidney_stone_cnn.pth` — model checkpoint
    - `models/vision_metrics.json` — honest held-out test metrics + training hyperparameters
 
+   For an NVIDIA GPU, install the CUDA build of torch/torchvision *before* `pip install -r
+   requirements.txt` (adjust `cu126` to whatever your driver supports):
+   ```bash
+   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+   ```
+   CPU-only training works but is roughly 15-20x slower per epoch.
+
+4. **Calibrate the stone-size estimate** against the trained model (one-time, after training):
+   ```bash
+   python calibrate_size_scale.py
+   ```
+   Writes `models/stone_scale.json` with a population-derived mm-per-pixel scale (median stone
+   ≈6mm, matching typical clinical ranges). Without this step, size estimates fall back to an
+   uncalibrated default pixel spacing.
+
 The reported accuracy is computed on a test split that never overlaps training data, and the same
 numbers are surfaced by `GET /api/vision/metrics` and shown in the frontend.
 
@@ -53,7 +68,8 @@ numbers are surfaced by `GET /api/vision/metrics` and shown in the frontend.
 - **Does:** binary image-level classification into `normal` or `stone`, with a confidence score.
 - **Does (approximate):** estimate stone size from the model's own Grad-CAM attention region.
   The size is the largest in-image dimension of the strongest-attention blob, converted to mm
-  using an assumed pixel spacing of `0.78 mm/pixel` (uploaded images carry no DICOM metadata).
+  using the calibrated pixel spacing from `calibrate_size_scale.py` (uploaded images carry no
+  DICOM metadata, so this population-derived spacing is a documented approximation).
   It is surfaced as an estimate (`size_estimated: true`), not a clinical measurement.
 - **Does not:** estimate stone location or composition. The API returns
   `stone_location = "Not estimated (image-level analysis only)"`, and `severity` of `none`/`present`.
