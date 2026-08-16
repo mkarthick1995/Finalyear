@@ -122,6 +122,7 @@ curl http://localhost:8001/api/auth/me -H "Authorization: Bearer <token>"
 | GET | `/api/meals/{patient_id}/history` | token |
 | GET | `/api/diet-recommendations/{stone_type}` | no |
 | GET | `/api/risk-insights/{patient_id}` | token |
+| GET | `/api/risk-insights/{patient_id}/history` | token |
 | GET | `/api/patients/{patient_id}/health-summary` | token |
 | POST | `/api/appointments` | token |
 | GET | `/api/appointments/{patient_id}` | token |
