@@ -45,12 +45,16 @@ model is missing, the endpoint returns `503` and `/api/health` reports `"vision_
    - `models/kidney_stone_cnn.pth` — model checkpoint
    - `models/vision_metrics.json` — honest held-out test metrics + training hyperparameters
 
+   **No GPU needed** — `get_device()` auto-selects CUDA, then Apple Silicon (MPS), then falls
+   back to CPU with no config required. Expect roughly **2-3 minutes on a CUDA GPU** vs.
+   **30-50 minutes CPU-only** for the default 10 epochs (~1900 training images); this is a
+   one-time cost, not something you repeat per app run.
+
    For an NVIDIA GPU, install the CUDA build of torch/torchvision *before* `pip install -r
    requirements.txt` (adjust `cu126` to whatever your driver supports):
    ```bash
    pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
    ```
-   CPU-only training works but is roughly 15-20x slower per epoch.
 
 4. **Calibrate the stone-size estimate** against the trained model (one-time, after training):
    ```bash
@@ -58,7 +62,8 @@ model is missing, the endpoint returns `503` and `/api/health` reports `"vision_
    ```
    Writes `models/stone_scale.json` with a population-derived mm-per-pixel scale (median stone
    ≈6mm, matching typical clinical ranges). Without this step, size estimates fall back to an
-   uncalibrated default pixel spacing.
+   uncalibrated default pixel spacing. Also GPU/CPU-portable (~1 minute GPU, a few minutes CPU
+   for the default 400-image sample).
 
 The reported accuracy is computed on a test split that never overlaps training data, and the same
 numbers are surfaced by `GET /api/vision/metrics` and shown in the frontend.
